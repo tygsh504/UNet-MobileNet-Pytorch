@@ -1,2 +1,16 @@
 /data
 /venv
+/graphs
+
+# Ignore TensorBoard logs
+runs/
+*.tfevents*
+
+# Ignore PyTorch checkpoints
+checkpoints/
+*.pt
+*.pth
+
+# Python cache (garbage files)
+__pycache__/
+*.pyc

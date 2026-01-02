@@ -45,7 +45,7 @@ class BasicDataset(Dataset):
 
     def __getitem__(self, i):
         idx = self.ids[i]
-        mask_file = glob(opj(self.masks_dir,idx+"_mask.*"))  # self.mask_suffix
+        mask_file = glob(opj(self.masks_dir,idx+".*"))  # self.mask_suffix
         img_file = glob(opj(self.imgs_dir , idx + '.*'))
 
         assert len(mask_file) == 1, \

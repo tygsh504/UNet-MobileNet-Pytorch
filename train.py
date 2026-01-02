@@ -9,6 +9,7 @@ import torch.nn as nn
 from torch import optim
 from torch.backends import cudnn
 from tqdm import tqdm
+import matplotlib.pyplot as plt  # Added for plotting
 
 from utils.eval import eval_net
 # from unet import UNet
@@ -18,10 +19,57 @@ from torch.utils.tensorboard import SummaryWriter
 from utils.dataset import BasicDataset
 from torch.utils.data import DataLoader, random_split
 
-# 输入图片和标签的路径
-dir_img = 'data/liver/liver/train'
-dir_mask = 'data/liver/liver/masks'
-dir_checkpoint = 'data/liver/checkpoints'
+# Input image and label paths
+dir_img = r"C:\Users\tygsh\OneDrive\Desktop\KIE4002_FYP\Training_Dataset\Bacterial Leaf Blight\Training_Ori"
+dir_mask = r"C:\Users\tygsh\OneDrive\Desktop\KIE4002_FYP\Training_Dataset\Bacterial Leaf Blight\Training_GT"
+dir_checkpoint = r"C:\Users\tygsh\OneDrive\Desktop\KIE4002_FYP\Code\UNet-MobileNet-Pytorch\checkpoints"
+
+
+def plot_and_save_graphs(loss_hist, val_hist, lr_hist, output_dir=r"C:\Users\tygsh\OneDrive\Desktop\KIE4002_FYP\Code\UNet-MobileNet-Pytorch\graphs"):
+    """Plots and saves training graphs."""
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    # 1. Plot Training Loss
+    if loss_hist:
+        plt.figure(figsize=(10, 5))
+        steps, losses = zip(*loss_hist)
+        plt.plot(steps, losses, label='Training Loss')
+        plt.title('Training Loss over Steps')
+        plt.xlabel('Global Step')
+        plt.ylabel('Loss')
+        plt.legend()
+        plt.grid(True)
+        plt.savefig(os.path.join(output_dir, 'training_loss.png'))
+        plt.close()
+
+    # 2. Plot Validation Score (Dice or CrossEntropy)
+    if val_hist:
+        plt.figure(figsize=(10, 5))
+        steps, scores = zip(*val_hist)
+        plt.plot(steps, scores, label='Validation Score', color='orange')
+        plt.title('Validation Score over Steps')
+        plt.xlabel('Global Step')
+        plt.ylabel('Score')
+        plt.legend()
+        plt.grid(True)
+        plt.savefig(os.path.join(output_dir, 'validation_score.png'))
+        plt.close()
+
+    # 3. Plot Learning Rate
+    if lr_hist:
+        plt.figure(figsize=(10, 5))
+        steps, lrs = zip(*lr_hist)
+        plt.plot(steps, lrs, label='Learning Rate', color='green')
+        plt.title('Learning Rate over Steps')
+        plt.xlabel('Global Step')
+        plt.ylabel('Learning Rate')
+        plt.legend()
+        plt.grid(True)
+        plt.savefig(os.path.join(output_dir, 'learning_rate.png'))
+        plt.close()
+    
+    logging.info(f"Graphs saved to {output_dir}/")
 
 
 def train_net(net,
@@ -56,88 +104,114 @@ def train_net(net,
         Device:          {device.type}
         Images scaling:  {img_scale}
     ''')
-    # 定义优化器
+    
+    # --- Data collection lists ---
+    loss_history = []
+    val_score_history = []
+    lr_history = []
+    # -----------------------------
+
+    # Define optimizer
     optimizer = optim.RMSprop(net.parameters(), lr=lr,
                               weight_decay=1e-8, momentum=0.9)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, 'min' if net.num_classes > 1 else 'max', patience=2)
 
-    # 定义损失函数，类别大于1使用交叉熵，否则使用BCE
+    # Define loss function
     if net.num_classes > 1:
         criterion = nn.CrossEntropyLoss()
     else:
         criterion = nn.BCEWithLogitsLoss()
 
-    # 开始训练
-    for epoch in range(epochs):
-        net.train()
+    # Start training
+    try:
+        for epoch in range(epochs):
+            net.train()
 
-        epoch_loss = 0
-        with tqdm(total=n_train, desc=f'Epoch {epoch + 1}/{epochs}', unit='img') as pbar:
-            for batch in train_loader:
-                imgs = batch['image']
-                true_masks = batch['mask']
-                assert imgs.shape[1] == net.n_channels, \
-                    f'Network has been defined with {net.n_channels} input channels, ' \
-                    f'but loaded images have {imgs.shape[1]} channels. Please check that ' \
-                    'the images are loaded correctly.'
+            epoch_loss = 0
+            with tqdm(total=n_train, desc=f'Epoch {epoch + 1}/{epochs}', unit='img') as pbar:
+                for batch in train_loader:
+                    imgs = batch['image']
+                    true_masks = batch['mask']
+                    assert imgs.shape[1] == net.n_channels, \
+                        f'Network has been defined with {net.n_channels} input channels, ' \
+                        f'but loaded images have {imgs.shape[1]} channels. Please check that ' \
+                        'the images are loaded correctly.'
 
-                imgs = imgs.to(device=device, dtype=torch.float32)
-                mask_type = torch.float32 if net.num_classes == 1 else torch.long
-                true_masks = true_masks.to(device=device, dtype=mask_type)
-                masks_pred = net(imgs)
-                loss = criterion(masks_pred, true_masks)
-                epoch_loss += loss.item()
-                writer.add_scalar('Loss/train', loss.item(), global_step)
+                    imgs = imgs.to(device=device, dtype=torch.float32)
+                    mask_type = torch.float32 if net.num_classes == 1 else torch.long
+                    true_masks = true_masks.to(device=device, dtype=mask_type)
+                    masks_pred = net(imgs)
+                    loss = criterion(masks_pred, true_masks)
+                    epoch_loss += loss.item()
+                    writer.add_scalar('Loss/train', loss.item(), global_step)
 
-                pbar.set_postfix(**{'loss (batch)': loss.item()})
+                    # --- Record Training Loss ---
+                    loss_history.append((global_step, loss.item()))
+                    # ----------------------------
 
-                optimizer.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_value_(net.parameters(), 0.1)
-                optimizer.step()
+                    pbar.set_postfix(**{'loss (batch)': loss.item()})
 
-                pbar.update(imgs.shape[0])
-                global_step += 1
-                if global_step % (n_train // (10 * batch_size)) == 0:
-                    for tag, value in net.named_parameters():
-                        tag = tag.replace('.', '/')
-                        writer.add_histogram(
-                            'weights/' + tag, value.data.cpu().numpy(), global_step)
-                        # writer.add_histogram('grads/' + tag, value.grad.data.cpu().numpy(), global_step)
-                    val_score = eval_net(net, val_loader, device)
-                    scheduler.step(val_score)
-                    writer.add_scalar(
-                        'learning_rate', optimizer.param_groups[0]['lr'], global_step)
+                    optimizer.zero_grad()
+                    loss.backward()
+                    nn.utils.clip_grad_value_(net.parameters(), 0.1)
+                    optimizer.step()
 
-                    if net.num_classes > 1:
-                        logging.info(
-                            'Validation cross entropy: {}'.format(val_score))
-                        writer.add_scalar('Loss/test', val_score, global_step)
-                    else:
-                        logging.info(
-                            'Validation Dice Coeff: {}'.format(val_score))
-                        writer.add_scalar('Dice/test', val_score, global_step)
+                    pbar.update(imgs.shape[0])
+                    global_step += 1
+                    if global_step % (n_train // (10 * batch_size)) == 0:
+                        for tag, value in net.named_parameters():
+                            tag = tag.replace('.', '/')
+                            writer.add_histogram(
+                                'weights/' + tag, value.data.cpu().numpy(), global_step)
+                            # writer.add_histogram('grads/' + tag, value.grad.data.cpu().numpy(), global_step)
+                        val_score = eval_net(net, val_loader, device)
+                        scheduler.step(val_score)
+                        writer.add_scalar(
+                            'learning_rate', optimizer.param_groups[0]['lr'], global_step)
 
-                    writer.add_images('images', imgs, global_step)
-                    if net.num_classes == 1:
-                        writer.add_images(
-                            'masks/true', true_masks, global_step)
-                        writer.add_images(
-                            'masks/pred', torch.sigmoid(masks_pred) > 0.5, global_step)
+                        # --- Record Validation Score and LR ---
+                        val_score_history.append((global_step, val_score))
+                        lr_history.append((global_step, optimizer.param_groups[0]['lr']))
+                        # --------------------------------------
 
-        # 保存模型
-        if save_cp and (not epoch%10):
-            try:
-                os.mkdir(dir_checkpoint)
-                logging.info('Created checkpoint directory')
-            except OSError:
-                pass
-            torch.save(net.state_dict(),
-                       os.path.join(dir_checkpoint, f'MobileNet_UNet_epoch{epoch + 1}.pt'))
-            logging.info(f'Checkpoint {epoch + 1} saved !')
+                        if net.num_classes > 1:
+                            logging.info(
+                                'Validation cross entropy: {}'.format(val_score))
+                            writer.add_scalar('Loss/test', val_score, global_step)
+                        else:
+                            logging.info(
+                                'Validation Dice Coeff: {}'.format(val_score))
+                            writer.add_scalar('Dice/test', val_score, global_step)
 
-    writer.close()
+                        writer.add_images('images', imgs, global_step)
+                        if net.num_classes == 1:
+                            writer.add_images(
+                                'masks/true', true_masks, global_step)
+                            writer.add_images(
+                                'masks/pred', torch.sigmoid(masks_pred) > 0.5, global_step)
+
+            # Save model
+            if save_cp and (not epoch % 10):
+                try:
+                    os.mkdir(dir_checkpoint)
+                    logging.info('Created checkpoint directory')
+                except OSError:
+                    pass
+                torch.save(net.state_dict(),
+                           os.path.join(dir_checkpoint, f'MobileNet_UNet_epoch{epoch + 1}.pt'))
+                logging.info(f'Checkpoint {epoch + 1} saved !')
+
+    except KeyboardInterrupt:
+        torch.save(net.state_dict(), 'INTERRUPTED.pt')
+        logging.info('Saved interrupt')
+        raise
+    
+    finally:
+        writer.close()
+        # --- Plot Graphs on Exit ---
+        plot_and_save_graphs(loss_history, val_score_history, lr_history)
+        # ---------------------------
 
 
 def get_args():
@@ -164,28 +238,28 @@ if __name__ == '__main__':
                         format='%(levelname)s: %(message)s')
     args = get_args()
 
-    # 判断是否使用GPU训练
+    # Determine whether to use GPU
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logging.info(f'Using device {device}')
 
-    # 导入网络模型，这里需要结合自己的数据集调整n_channels和num_classes：
+    # Import network model
     # n_channels=3 for RGB images
-    # num_classes的设置原则如下：1. 对于1个类别和背景，num_classes=1; 2. 对于2个类别，num_classes=1; 类别数N大于2，num_classes=N
+    # num_classes logic: 1 for 1 class+background, or 2 classes. N for >2 classes.
     net = UNet(n_channels=3, num_classes=1)
 
     logging.info(f'Network:\n'
                  f'\t{net.n_channels} input channels\n'
                  f'\t{net.num_classes} output channels (classes)\n')
 
-    # 是否导入预训练权重进行迁移学习
+    # Load pretrained weights if provided
     if args.load:
         model_dict = net.state_dict()
         model_path = args.load
         pretrained_dict = torch.load(model_path, map_location=device)
-        # 筛除不加载的层结构
+        # Filter out unnecessary layers
         pretrained_dict = {k: v for k,
                            v in pretrained_dict.items() if k in model_dict}
-        # 更新当前网络的结构字典
+        # Update current network dictionary
         model_dict.update(pretrained_dict)
         net.load_state_dict(model_dict)
         logging.info(f'Model loaded from {args.load}')
@@ -204,5 +278,4 @@ if __name__ == '__main__':
                   img_scale=args.scale,
                   val_percent=args.val / 100)
     except KeyboardInterrupt:
-        torch.save(net.state_dict(), 'INTERRUPTED.pt')
-        logging.info('Saved interrupt')
+        pass  # Handled inside train_net now
