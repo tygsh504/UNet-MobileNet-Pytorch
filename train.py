@@ -291,7 +291,7 @@ import torch.nn as nn
 from torch import optim
 from torch.backends import cudnn
 from tqdm import tqdm
-import matplotlib.pyplot as plt  # Import matplotlib
+import matplotlib.pyplot as plt
 
 from utils.eval import eval_net
 from mobilenet.UNet_MobileNet import UNet
@@ -301,11 +301,7 @@ from torch.utils.tensorboard import SummaryWriter
 from utils.dataset import BasicDataset
 from torch.utils.data import DataLoader, random_split
 
-# Input image and label paths
-dir_img = r"C:\Users\tygsh\OneDrive\Desktop\KIE4002_FYP\Training_Dataset\Combined\Training_Ori"
-dir_mask = r"C:\Users\tygsh\OneDrive\Desktop\KIE4002_FYP\Training_Dataset\Combined\Training_GT"
-dir_checkpoint = r"C:\Users\tygsh\OneDrive\Desktop\KIE4002_FYP\Code\UNet-MobileNet-Pytorch\checkpoints\combined"
-
+# NOTE: Global paths removed. They are now passed via command line arguments.
 
 def plot_metrics(loss_hist, dice_hist, lr_hist, output_dir='graphs'):
     """Plots and saves graphs for Training Loss, Validation Dice, and Learning Rate."""
@@ -356,6 +352,9 @@ def plot_metrics(loss_hist, dice_hist, lr_hist, output_dir='graphs'):
 
 def train_net(net,
               device,
+              dir_img,
+              dir_mask,
+              dir_checkpoint,
               epochs=5,
               batch_size=1,
               lr=0.001,
@@ -385,6 +384,9 @@ def train_net(net,
         Checkpoints:     {save_cp}
         Device:          {device.type}
         Images scaling:  {img_scale}
+        Images dir:      {dir_img}
+        Masks dir:       {dir_mask}
+        Checkpoints dir: {dir_checkpoint}
     ''')
     
     optimizer = optim.RMSprop(net.parameters(), lr=lr,
@@ -520,6 +522,15 @@ def get_args():
                         help='Downscaling factor of the images')
     parser.add_argument('-v', '--validation', dest='val', type=float, default=10.0,
                         help='Percent of the data that is used as validation (0-100)')
+    
+    # --- Custom Arguments for Paths ---
+    parser.add_argument('--img-dir', type=str, default='data/imgs',
+                        help='Directory containing the images')
+    parser.add_argument('--mask-dir', type=str, default='data/masks',
+                        help='Directory containing the masks')
+    parser.add_argument('--checkpoint-dir', type=str, default='checkpoints',
+                        help='Directory to save checkpoints')
+    # ----------------------------------
 
     return parser.parse_args()
 
@@ -556,6 +567,9 @@ if __name__ == '__main__':
                   lr=args.lr,
                   device=device,
                   img_scale=args.scale,
-                  val_percent=args.val / 100)
+                  val_percent=args.val / 100,
+                  dir_img=args.img_dir,
+                  dir_mask=args.mask_dir,
+                  dir_checkpoint=args.checkpoint_dir)
     except KeyboardInterrupt:
         pass
