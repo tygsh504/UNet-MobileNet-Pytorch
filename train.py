@@ -291,20 +291,67 @@ import torch.nn as nn
 from torch import optim
 from torch.backends import cudnn
 from tqdm import tqdm
+import matplotlib.pyplot as plt  # Import matplotlib
 
 from utils.eval import eval_net
-# from unet import UNet
 from mobilenet.UNet_MobileNet import UNet
-from utils.dice_loss import dice_coeff  # <--- Added this import
+from utils.dice_loss import dice_coeff
 
 from torch.utils.tensorboard import SummaryWriter
 from utils.dataset import BasicDataset
 from torch.utils.data import DataLoader, random_split
 
 # Input image and label paths
-dir_img = 'data/liver/liver/train'
-dir_mask = 'data/liver/liver/masks'
-dir_checkpoint = 'data/liver/checkpoints'
+dir_img = r"C:\Users\tygsh\OneDrive\Desktop\KIE4002_FYP\Training_Dataset\Combined\Training_Ori"
+dir_mask = r"C:\Users\tygsh\OneDrive\Desktop\KIE4002_FYP\Training_Dataset\Combined\Training_GT"
+dir_checkpoint = r"C:\Users\tygsh\OneDrive\Desktop\KIE4002_FYP\Code\UNet-MobileNet-Pytorch\checkpoints\combined"
+
+
+def plot_metrics(loss_hist, dice_hist, lr_hist, output_dir='graphs'):
+    """Plots and saves graphs for Training Loss, Validation Dice, and Learning Rate."""
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    # 1. Plot Average Training Loss per Epoch
+    if loss_hist:
+        plt.figure(figsize=(10, 5))
+        epochs, losses = zip(*loss_hist)
+        plt.plot(epochs, losses, marker='o', label='Avg Training Loss')
+        plt.title('Training Loss over Epochs')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.grid(True)
+        plt.legend()
+        plt.savefig(os.path.join(output_dir, 'training_loss_over_epoch.png'))
+        plt.close()
+
+    # 2. Plot Validation Dice over Epochs (Continuous)
+    if dice_hist:
+        plt.figure(figsize=(10, 5))
+        epochs, scores = zip(*dice_hist)
+        plt.plot(epochs, scores, color='orange', label='Validation Dice')
+        plt.title('Validation Dice Coefficient over Epochs')
+        plt.xlabel('Epoch')
+        plt.ylabel('Dice Coefficient')
+        plt.grid(True)
+        plt.legend()
+        plt.savefig(os.path.join(output_dir, 'val_dice_over_epoch.png'))
+        plt.close()
+
+    # 3. Plot Learning Rate over Epochs (Continuous)
+    if lr_hist:
+        plt.figure(figsize=(10, 5))
+        epochs, lrs = zip(*lr_hist)
+        plt.plot(epochs, lrs, color='green', label='Learning Rate')
+        plt.title('Learning Rate over Epochs')
+        plt.xlabel('Epoch')
+        plt.ylabel('Learning Rate')
+        plt.grid(True)
+        plt.legend()
+        plt.savefig(os.path.join(output_dir, 'learning_rate_over_epoch.png'))
+        plt.close()
+    
+    logging.info(f"Graphs saved to {output_dir}/")
 
 
 def train_net(net,
@@ -350,92 +397,112 @@ def train_net(net,
     else:
         criterion = nn.BCEWithLogitsLoss()
 
-    # Initialize validation metrics for display
+    # --- Lists to store history for plotting ---
+    train_loss_history = []  # Stores (epoch, avg_loss)
+    val_dice_history = []    # Stores (epoch_float, dice)
+    lr_history = []          # Stores (epoch_float, lr)
+    # -------------------------------------------
+
+    # Initialize display variables
     val_loss = 0.0
     val_dice = 0.0
+    
+    try:
+        for epoch in range(epochs):
+            net.train()
 
-    for epoch in range(epochs):
-        net.train()
+            epoch_loss = 0
+            # Use len(train_loader) to calculate average loss later
+            num_batches = len(train_loader)
+            
+            with tqdm(total=n_train, desc=f'Epoch {epoch + 1}/{epochs}', unit='img', ncols=160) as pbar:
+                for i, batch in enumerate(train_loader):
+                    imgs = batch['image']
+                    true_masks = batch['mask']
+                    assert imgs.shape[1] == net.n_channels, \
+                        f'Network has been defined with {net.n_channels} input channels, ' \
+                        f'but loaded images have {imgs.shape[1]} channels.'
 
-        epoch_loss = 0
-        # Increased bar width for better visibility
-        with tqdm(total=n_train, desc=f'Epoch {epoch + 1}/{epochs}', unit='img', ncols=160) as pbar:
-            for batch in train_loader:
-                imgs = batch['image']
-                true_masks = batch['mask']
-                assert imgs.shape[1] == net.n_channels, \
-                    f'Network has been defined with {net.n_channels} input channels, ' \
-                    f'but loaded images have {imgs.shape[1]} channels.'
-
-                imgs = imgs.to(device=device, dtype=torch.float32)
-                mask_type = torch.float32 if net.num_classes == 1 else torch.long
-                true_masks = true_masks.to(device=device, dtype=mask_type)
-                
-                masks_pred = net(imgs)
-                loss = criterion(masks_pred, true_masks)
-                epoch_loss += loss.item()
-                writer.add_scalar('Loss/train', loss.item(), global_step)
-
-                # --- Calculate Train Dice for Display ---
-                train_dice = 0.0
-                if net.num_classes == 1:
-                    pred_binary = (torch.sigmoid(masks_pred) > 0.5).float()
-                    train_dice = dice_coeff(pred_binary, true_masks).item()
-                # ----------------------------------------
-
-                # --- Update Progress Bar ---
-                pbar.set_postfix(**{
-                    'T_Loss': f'{loss.item():.4f}',
-                    'T_Dice': f'{train_dice:.4f}',
-                    'V_Loss': f'{val_loss:.4f}',
-                    'V_Dice': f'{val_dice:.4f}',
-                    'LR': f'{optimizer.param_groups[0]["lr"]:.6f}'
-                })
-                # ---------------------------
-
-                optimizer.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_value_(net.parameters(), 0.1)
-                optimizer.step()
-
-                pbar.update(imgs.shape[0])
-                global_step += 1
-                
-                # Validation Step
-                if global_step % (n_train // (10 * batch_size)) == 0:
-                    for tag, value in net.named_parameters():
-                        tag = tag.replace('.', '/')
-                        writer.add_histogram('weights/' + tag, value.data.cpu().numpy(), global_step)
-
-                    # Get both Loss and Dice from updated eval_net
-                    val_loss, val_dice = eval_net(net, val_loader, device)
+                    imgs = imgs.to(device=device, dtype=torch.float32)
+                    mask_type = torch.float32 if net.num_classes == 1 else torch.long
+                    true_masks = true_masks.to(device=device, dtype=mask_type)
                     
-                    # Scheduler uses Dice (maximize) or Loss (minimize)
-                    # For 1 class, we usually want to maximize Dice
-                    scheduler.step(val_dice)
+                    masks_pred = net(imgs)
+                    loss = criterion(masks_pred, true_masks)
+                    epoch_loss += loss.item()
+                    writer.add_scalar('Loss/train', loss.item(), global_step)
 
-                    writer.add_scalar('learning_rate', optimizer.param_groups[0]['lr'], global_step)
-                    writer.add_scalar('Loss/test', val_loss, global_step)
-                    writer.add_scalar('Dice/test', val_dice, global_step)
-
-                    logging.info(f' Validation Dice: {val_dice:.4f}, Validation Loss: {val_loss:.4f}')
-
-                    writer.add_images('images', imgs, global_step)
+                    # --- Terminal Display Logic ---
+                    train_dice = 0.0
                     if net.num_classes == 1:
-                        writer.add_images('masks/true', true_masks, global_step)
-                        writer.add_images('masks/pred', torch.sigmoid(masks_pred) > 0.5, global_step)
+                        pred_binary = (torch.sigmoid(masks_pred) > 0.5).float()
+                        train_dice = dice_coeff(pred_binary, true_masks).item()
+                    
+                    pbar.set_postfix(**{
+                        'T_Loss': f'{loss.item():.4f}',
+                        'T_Dice': f'{train_dice:.4f}',
+                        'V_Loss': f'{val_loss:.4f}',
+                        'V_Dice': f'{val_dice:.4f}',
+                        'LR': f'{optimizer.param_groups[0]["lr"]:.6f}'
+                    })
+                    # ------------------------------
 
-        if save_cp and (not epoch % 10):
-            try:
-                os.mkdir(dir_checkpoint)
-                logging.info('Created checkpoint directory')
-            except OSError:
-                pass
-            torch.save(net.state_dict(),
-                       os.path.join(dir_checkpoint, f'MobileNet_UNet_epoch{epoch + 1}.pt'))
-            logging.info(f'Checkpoint {epoch + 1} saved !')
+                    optimizer.zero_grad()
+                    loss.backward()
+                    nn.utils.clip_grad_value_(net.parameters(), 0.1)
+                    optimizer.step()
 
-    writer.close()
+                    pbar.update(imgs.shape[0])
+                    global_step += 1
+                    
+                    # Validation Step (occurs multiple times per epoch)
+                    if global_step % (n_train // (10 * batch_size)) == 0:
+                        val_loss, val_dice = eval_net(net, val_loader, device)
+                        scheduler.step(val_dice)
+
+                        writer.add_scalar('learning_rate', optimizer.param_groups[0]['lr'], global_step)
+                        writer.add_scalar('Loss/test', val_loss, global_step)
+                        writer.add_scalar('Dice/test', val_dice, global_step)
+
+                        logging.info(f' Validation Dice: {val_dice:.4f}, Validation Loss: {val_loss:.4f}')
+
+                        # --- Record Data for Graphs (Fractional Epoch) ---
+                        # Calculate exact position in epoch (e.g., 1.1, 1.2)
+                        current_epoch_float = epoch + (i + 1) / num_batches
+                        val_dice_history.append((current_epoch_float, val_dice))
+                        lr_history.append((current_epoch_float, optimizer.param_groups[0]['lr']))
+                        # -------------------------------------------------
+
+                        writer.add_images('images', imgs, global_step)
+                        if net.num_classes == 1:
+                            writer.add_images('masks/true', true_masks, global_step)
+                            writer.add_images('masks/pred', torch.sigmoid(masks_pred) > 0.5, global_step)
+
+            # --- Record Average Training Loss for the Epoch ---
+            avg_epoch_loss = epoch_loss / num_batches
+            train_loss_history.append((epoch + 1, avg_epoch_loss))
+            # --------------------------------------------------
+
+            if save_cp and (not epoch % 10):
+                try:
+                    os.mkdir(dir_checkpoint)
+                    logging.info('Created checkpoint directory')
+                except OSError:
+                    pass
+                torch.save(net.state_dict(),
+                           os.path.join(dir_checkpoint, f'MobileNet_UNet_epoch{epoch + 1}.pt'))
+                logging.info(f'Checkpoint {epoch + 1} saved !')
+
+    except KeyboardInterrupt:
+        torch.save(net.state_dict(), 'INTERRUPTED.pt')
+        logging.info('Saved interrupt')
+        raise
+        
+    finally:
+        writer.close()
+        # --- Plot Graphs on Finish/Exit ---
+        plot_metrics(train_loss_history, val_dice_history, lr_history)
+        # ----------------------------------
 
 
 def get_args():
@@ -491,5 +558,4 @@ if __name__ == '__main__':
                   img_scale=args.scale,
                   val_percent=args.val / 100)
     except KeyboardInterrupt:
-        torch.save(net.state_dict(), 'INTERRUPTED.pt')
-        logging.info('Saved interrupt')
+        pass
