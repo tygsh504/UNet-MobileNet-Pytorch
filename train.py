@@ -19,6 +19,7 @@ from torch.utils.tensorboard import SummaryWriter
 from utils.dataset import BasicDataset
 from torch.utils.data import DataLoader, random_split
 
+
 def plot_metrics(loss_hist, dice_hist, lr_hist, output_dir='graphs'):
     """Plots and saves graphs for Training Loss, Validation Dice, and Learning Rate."""
     if not os.path.exists(output_dir):
@@ -71,6 +72,7 @@ def train_net(net,
               dir_img,
               dir_mask,
               dir_checkpoint,
+              dir_graph,
               epochs=5,
               batch_size=1,
               lr=0.001,
@@ -103,20 +105,13 @@ def train_net(net,
         Images dir:      {dir_img}
         Masks dir:       {dir_mask}
         Checkpoints dir: {dir_checkpoint}
+        Graphs dir:      {dir_graph}
     ''')
     
     optimizer = optim.RMSprop(net.parameters(), lr=lr,
                               weight_decay=1e-8, momentum=0.9)
-    
-    # Initialize Scheduler and Best Score tracking
-    if net.num_classes > 1:
-        # Multiclass: Minimize Loss
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=2)
-        best_score = float('inf') 
-    else:
-        # Binary: Maximize Dice
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=2)
-        best_score = 0.0
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, 'min' if net.num_classes > 1 else 'max', patience=2)
 
     if net.num_classes > 1:
         criterion = nn.CrossEntropyLoss()
@@ -129,11 +124,20 @@ def train_net(net,
     lr_history = []          # Stores (epoch, lr)
     # -------------------------------------------
 
-    # Initialize display variables
+    # Initialize variables
     val_loss = 0.0
     val_dice = 0.0
+    best_dice = 0.0  # To track the best validation performance
     
     try:
+        # Create checkpoint directory once at the start if saving is enabled
+        if save_cp:
+            try:
+                os.makedirs(dir_checkpoint, exist_ok=True)
+                logging.info('Created checkpoint directory')
+            except OSError:
+                pass
+
         for epoch in range(epochs):
             net.train()
 
@@ -167,7 +171,8 @@ def train_net(net,
                     pbar.set_postfix(**{
                         'T_Loss': f'{loss.item():.4f}',
                         'T_Dice': f'{train_dice:.4f}',
-                        'Prev_Best': f'{best_score:.4f}',
+                        'Prev_V_Dice': f'{val_dice:.4f}',
+                        'Best_V_Dice': f'{best_dice:.4f}',
                         'LR': f'{optimizer.param_groups[0]["lr"]:.6f}'
                     })
                     # ------------------------------
@@ -180,16 +185,13 @@ def train_net(net,
                     pbar.update(imgs.shape[0])
                     global_step += 1
 
-            # 2. Validation Step (Run ONCE at the end of the epoch)
+            # 2. Validation Step (Runs ONCE at the end of the epoch)
             val_loss, val_dice = eval_net(net, val_loader, device)
-            
-            # Determine metric for scheduler and best score
-            if net.num_classes > 1:
-                scheduler_score = val_loss
-            else:
-                scheduler_score = val_dice
-            
-            scheduler.step(scheduler_score)
+            scheduler.step(val_dice)
+
+            writer.add_scalar('learning_rate', optimizer.param_groups[0]['lr'], global_step)
+            writer.add_scalar('Loss/test', val_loss, global_step)
+            writer.add_scalar('Dice/test', val_dice, global_step)
 
             logging.info(f'End of Epoch {epoch + 1} | Validation Dice: {val_dice:.4f}, Validation Loss: {val_loss:.4f}')
 
@@ -208,34 +210,18 @@ def train_net(net,
             train_loss_history.append((epoch + 1, avg_epoch_loss))
             # --------------------------------------------------
 
-            # 3. Checkpoint Saving (Last and Best only)
+            # 3. Checkpoint Saving Logic
             if save_cp:
-                try:
-                    os.makedirs(dir_checkpoint, exist_ok=True)
-                except OSError:
-                    pass
+                # Save "Last" Model (Overwrites every epoch)
+                torch.save(net.state_dict(),
+                           os.path.join(dir_checkpoint, 'last_model.pt'))
                 
-                # Always save the last model
-                last_path = os.path.join(dir_checkpoint, 'last_model.pth')
-                torch.save(net.state_dict(), last_path)
-                
-                # Check if this is the best model
-                is_best = False
-                if net.num_classes > 1:
-                    # For multiclass, lower loss is better
-                    if scheduler_score < best_score:
-                        best_score = scheduler_score
-                        is_best = True
-                else:
-                    # For binary, higher dice is better
-                    if scheduler_score > best_score:
-                        best_score = scheduler_score
-                        is_best = True
-                
-                if is_best:
-                    best_path = os.path.join(dir_checkpoint, 'best_model.pth')
-                    torch.save(net.state_dict(), best_path)
-                    logging.info(f'New Best Model saved! Score: {best_score:.4f}')
+                # Save "Best" Model (Only if current dice > best dice)
+                if val_dice > best_dice:
+                    best_dice = val_dice
+                    torch.save(net.state_dict(),
+                               os.path.join(dir_checkpoint, 'best_model.pt'))
+                    logging.info(f'New best model saved! (Dice: {best_dice:.4f})')
 
     except KeyboardInterrupt:
         torch.save(net.state_dict(), 'INTERRUPTED.pt')
@@ -245,7 +231,7 @@ def train_net(net,
     finally:
         writer.close()
         # --- Plot Graphs on Finish/Exit ---
-        plot_metrics(train_loss_history, val_dice_history, lr_history)
+        plot_metrics(train_loss_history, val_dice_history, lr_history, output_dir=dir_graph)
         # ----------------------------------
 
 
@@ -272,6 +258,8 @@ def get_args():
                         help='Directory containing the masks')
     parser.add_argument('--checkpoint-dir', type=str, default='checkpoints',
                         help='Directory to save checkpoints')
+    parser.add_argument('--graph-dir', type=str, default='graphs',
+                        help='Directory to save training graphs')
     # ----------------------------------
 
     return parser.parse_args()
@@ -312,6 +300,7 @@ if __name__ == '__main__':
                   val_percent=args.val / 100,
                   dir_img=args.img_dir,
                   dir_mask=args.mask_dir,
-                  dir_checkpoint=args.checkpoint_dir)
+                  dir_checkpoint=args.checkpoint_dir,
+                  dir_graph=args.graph_dir)
     except KeyboardInterrupt:
         pass
