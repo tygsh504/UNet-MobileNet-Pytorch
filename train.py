@@ -113,10 +113,6 @@ def train_net(net,
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, 'min' if net.num_classes > 1 else 'max', patience=2)
 
-    # --- AMP: Initialize GradScaler ---
-    scaler = torch.cuda.amp.GradScaler(enabled=True)
-    # ----------------------------------
-
     if net.num_classes > 1:
         criterion = nn.CrossEntropyLoss()
     else:
@@ -161,19 +157,14 @@ def train_net(net,
                     mask_type = torch.float32 if net.num_classes == 1 else torch.long
                     true_masks = true_masks.to(device=device, dtype=mask_type)
                     
-                    # --- AMP: Autocast Forward Pass ---
-                    with torch.cuda.amp.autocast(enabled=True):
-                        masks_pred = net(imgs)
-                        loss = criterion(masks_pred, true_masks)
-                    # ----------------------------------
-
+                    masks_pred = net(imgs)
+                    loss = criterion(masks_pred, true_masks)
                     epoch_loss += loss.item()
                     writer.add_scalar('Loss/train', loss.item(), global_step)
 
                     # --- Terminal Display Logic ---
                     train_dice = 0.0
                     if net.num_classes == 1:
-                        # Note: We detach/float here to ensure we don't break graph if reused
                         pred_binary = (torch.sigmoid(masks_pred) > 0.5).float()
                         train_dice = dice_coeff(pred_binary, true_masks).item()
                     
@@ -187,14 +178,9 @@ def train_net(net,
                     # ------------------------------
 
                     optimizer.zero_grad()
-                    
-                    # --- AMP: Scale Loss and Step Optimizer ---
-                    scaler.scale(loss).backward()
-                    scaler.unscale_(optimizer)
+                    loss.backward()
                     nn.utils.clip_grad_value_(net.parameters(), 0.1)
-                    scaler.step(optimizer)
-                    scaler.update()
-                    # ------------------------------------------
+                    optimizer.step()
 
                     pbar.update(imgs.shape[0])
                     global_step += 1
