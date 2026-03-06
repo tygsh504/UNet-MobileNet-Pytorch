@@ -14,3 +14,6 @@ checkpoints/
 # Python cache (garbage files)
 __pycache__/
 *.pyc
+
+/testing_output
+/training_output
